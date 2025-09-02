@@ -5,9 +5,7 @@
  */
 #include <assert.h>
 #include <errno.h>
-#include <stdio.h>
 #include <string.h>
-
 #include <zcbor_decode.h>
 #include <zcbor_encode.h>
 #include <golioth/ota.h>

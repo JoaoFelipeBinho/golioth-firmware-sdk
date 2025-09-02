@@ -4,12 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <assert.h>
-#include <errno.h>
-#include <string.h>
-
 #include <golioth/client.h>
+#include <string.h>
 #include <golioth/golioth_debug.h>
+#include <assert.h>
 #include "coap_client.h"
 #include "coap_blockwise.h"
 
@@ -28,7 +26,7 @@ struct blockwise_transfer
     enum golioth_content_type content_type;
     uint8_t token[GOLIOTH_COAP_TOKEN_LEN];
     const char *path_prefix;
-    char path[CONFIG_GOLIOTH_COAP_MAX_PATH_LEN + 1];
+    const char *path;
     enum golioth_coap_request_type type;
 
     enum golioth_status status;
@@ -73,24 +71,23 @@ static void on_block_rcvd(struct golioth_client *client,
                           void *arg);
 
 // Function to initialize the blockwise_transfer structure
-static int blockwise_transfer_init(struct blockwise_transfer *ctx,
-                                   struct golioth_client *client,
-                                   const char *path_prefix,
-                                   const char *path,
-                                   enum golioth_content_type content_type)
+static void blockwise_transfer_init(struct blockwise_transfer *ctx,
+                                    struct golioth_client *client,
+                                    const char *path_prefix,
+                                    const char *path,
+                                    enum golioth_content_type content_type)
 {
-    if (strlen(path) > CONFIG_GOLIOTH_COAP_MAX_PATH_LEN)
-    {
-        return -EINVAL;
-    }
-    strncpy(ctx->path, path, CONFIG_GOLIOTH_COAP_MAX_PATH_LEN);
-
     ctx->client = client;
     ctx->path_prefix = path_prefix;
+    ctx->path = path;
     ctx->content_type = content_type;
     golioth_coap_next_token(ctx->token);
+}
 
-    return 0;
+// Function to free the blockwise_transfer structure
+static void blockwise_transfer_free(struct blockwise_transfer *ctx)
+{
+    golioth_sys_free(ctx);
 }
 
 /* Blockwise Uploads related functions */
@@ -236,10 +233,7 @@ enum golioth_status golioth_blockwise_post(struct golioth_client *client,
 
     struct post_block_ctx ctx;
 
-    if (0 != blockwise_transfer_init(&ctx.transfer_ctx, client, path_prefix, path, content_type))
-    {
-        return GOLIOTH_ERR_FAIL;
-    }
+    blockwise_transfer_init(&ctx.transfer_ctx, client, path_prefix, path, content_type);
     ctx.transfer_ctx.type = GOLIOTH_COAP_REQUEST_POST_BLOCK;
 
     ctx.block_buffer = golioth_sys_malloc(CONFIG_GOLIOTH_BLOCKWISE_UPLOAD_MAX_BLOCK_SIZE);
@@ -322,16 +316,23 @@ struct blockwise_transfer *golioth_blockwise_upload_start(struct golioth_client 
         return NULL;
     }
 
-    if (0 != blockwise_transfer_init(ctx, client, path_prefix, path, content_type))
+    blockwise_transfer_init(ctx, client, path_prefix, path, content_type);
+    ctx->type = GOLIOTH_COAP_REQUEST_POST_BLOCK;
+
+    /* Allocate and store path; freed in golioth_blockwise_upload_finish() */
+    char *path_buff = golioth_sys_malloc(strlen(path) + 1);
+    if (NULL == path_buff)
     {
         goto finish_with_ctx;
     }
-    ctx->type = GOLIOTH_COAP_REQUEST_POST_BLOCK;
+
+    strncpy(path_buff, path, strlen(path) + 1);
+    ctx->path = path_buff;
 
     return ctx;
 
 finish_with_ctx:
-    golioth_sys_free(ctx);
+    blockwise_transfer_free(ctx);
     return NULL;
 }
 
@@ -344,7 +345,9 @@ void golioth_blockwise_upload_finish(struct blockwise_transfer *ctx)
         return;
     }
 
-    golioth_sys_free(ctx);
+    /* ctx->path was allocated in golioth_blockwise_upload_start() */
+    free((char *) ctx->path);
+    blockwise_transfer_free(ctx);
 }
 
 // Send a single block asynchronously
@@ -373,7 +376,7 @@ enum golioth_status golioth_blockwise_upload_block(struct blockwise_transfer *ct
         rsp_ctx = malloc(sizeof(struct get_block_ctx));
         rsp_ctx->block_idx = 0;
         rsp_ctx->block_size = CONFIG_GOLIOTH_BLOCKWISE_DOWNLOAD_MAX_BLOCK_SIZE;
-        memcpy(&rsp_ctx->transfer_ctx, ctx, sizeof(struct blockwise_transfer));
+        rsp_ctx->transfer_ctx = *ctx;
         rsp_ctx->get_cb = get_cb;
         rsp_ctx->end_cb = end_cb;
         rsp_ctx->callback_arg = rsp_callback_arg;
@@ -505,11 +508,7 @@ enum golioth_status golioth_blockwise_get(struct golioth_client *client,
         return GOLIOTH_ERR_MEM_ALLOC;
     }
 
-    if (0 != blockwise_transfer_init(&ctx->transfer_ctx, client, path_prefix, path, content_type))
-    {
-        golioth_sys_free(ctx);
-        return GOLIOTH_ERR_FAIL;
-    }
+    blockwise_transfer_init(&ctx->transfer_ctx, client, path_prefix, path, content_type);
     ctx->transfer_ctx.type = GOLIOTH_COAP_REQUEST_GET_BLOCK;
 
     ctx->block_size = CONFIG_GOLIOTH_BLOCKWISE_DOWNLOAD_MAX_BLOCK_SIZE;

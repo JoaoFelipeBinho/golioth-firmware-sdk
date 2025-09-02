@@ -13,6 +13,13 @@
 #include <golioth/fw_update.h>
 #include "golioth/ota.h"
 
+//Osprey modifications Joao Felipe Amaral Santiago
+// email : joao@binho.io
+#include "nvs.h"
+#include "nvs_flash.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 _Static_assert(sizeof(CONFIG_GOLIOTH_FW_UPDATE_PACKAGE_NAME)
                    <= CONFIG_GOLIOTH_OTA_MAX_PACKAGE_NAME_LEN + 1,
                "GOLIOTH_FW_UPDATE_PACKAGE_NAME may be no longer than "
@@ -66,6 +73,42 @@ static struct fw_update_component_context _component_ctx;
 #define FW_REPORT_COMPONENT_NAME 1 << 0
 #define FW_REPORT_TARGET_VERSION 1 << 1
 #define FW_REPORT_CURRENT_VERSION 1 << 2
+
+static esp_err_t osprey_golioth_fw_update_nvs_rst(const char* nvs_name_key){
+  esp_err_t err = nvs_flash_init(); 
+  ESP_ERROR_CHECK(err);
+  
+  // 2. Open NVS namespace
+  nvs_handle_t my_handle;
+  ESP_ERROR_CHECK(nvs_open("storage", NVS_READWRITE, &my_handle));
+
+  // 3. Write a value
+  ESP_ERROR_CHECK(nvs_set_u8(my_handle, nvs_name_key, 0));
+  ESP_ERROR_CHECK(nvs_commit(my_handle));
+
+  // 5. Close
+  nvs_close(my_handle);
+
+  return err;
+}
+
+static esp_err_t osprey_golioth_fw_update_nvs_set(const char* nvs_name_key){
+  esp_err_t err = nvs_flash_init(); 
+  ESP_ERROR_CHECK(err);
+  
+  // 2. Open NVS namespace
+  nvs_handle_t my_handle;
+  ESP_ERROR_CHECK(nvs_open("storage", NVS_READWRITE, &my_handle));
+
+  // 3. Write a value
+  ESP_ERROR_CHECK(nvs_set_u8(my_handle, nvs_name_key, 1));
+  ESP_ERROR_CHECK(nvs_commit(my_handle));
+
+  // 5. Close
+  nvs_close(my_handle);
+
+  return err;
+}
 
 static enum golioth_status fw_write_block_cb(const struct golioth_ota_component *component,
                                              uint32_t block_idx,
@@ -397,234 +440,316 @@ static enum golioth_status fw_change_image_and_reboot()
 
 static void fw_update_thread(void *arg)
 {
-    // If it's the first time booting a new OTA image,
-    // wait for successful connection to Golioth.
-    //
-    // If we don't connect after the configured period, roll back to the old image.
-    if (fw_update_is_pending_verify())
-    {
-        GLTH_LOGI(TAG, "Waiting for golioth client to connect before cancelling rollback");
-        int seconds_elapsed = 0;
-        while (seconds_elapsed < CONFIG_GOLIOTH_FW_UPDATE_ROLLBACK_TIMER_S)
-        {
-            if (golioth_client_is_connected(_client))
-            {
-                break;
-            }
-            golioth_sys_msleep(1000);
-            seconds_elapsed++;
-        }
+  // If it's the first time booting a new OTA image,
+  // wait for successful connection to Golioth.
+  //
+  // If we don't connect after the configured period, roll back to the old image.
+  if (fw_update_is_pending_verify())
+  {
+    
+      GLTH_LOGI(TAG, "Waiting for golioth client to connect before cancelling rollback");
+      int seconds_elapsed = 0;
+      while (seconds_elapsed < CONFIG_GOLIOTH_FW_UPDATE_ROLLBACK_TIMER_S)
+      {
+          if (golioth_client_is_connected(_client))
+          {
+              break;
+          }
+          golioth_sys_msleep(1000);
+          seconds_elapsed++;
+      }
 
-        if (seconds_elapsed == CONFIG_GOLIOTH_FW_UPDATE_ROLLBACK_TIMER_S)
-        {
-            // We didn't connect to Golioth cloud, so something might be wrong with
-            // this firmware. Roll back and reboot.
-            GLTH_LOGW(TAG, "Failed to connect to Golioth");
-            GLTH_LOGW(TAG, "!!!");
-            GLTH_LOGW(TAG, "!!! Rolling back and rebooting now!");
-            GLTH_LOGW(TAG, "!!!");
-            fw_update_rollback();
-            fw_update_reboot();
-        }
-        else
-        {
-            GLTH_LOGI(TAG, "Firmware updated successfully!");
-            fw_update_cancel_rollback();
+      if (seconds_elapsed == CONFIG_GOLIOTH_FW_UPDATE_ROLLBACK_TIMER_S)
+      {
+          // We didn't connect to Golioth cloud, so something might be wrong with
+          // this firmware. Roll back and reboot.
+          GLTH_LOGW(TAG, "Failed to connect to Golioth");
+          GLTH_LOGW(TAG, "!!!");
+          GLTH_LOGW(TAG, "!!! Rolling back and rebooting now!");
+          GLTH_LOGW(TAG, "!!!");
+          fw_update_rollback();
+          fw_update_reboot();
+      }
+      else
+      {
+          GLTH_LOGI(TAG, "Firmware updated successfully!");
+          fw_update_cancel_rollback();
 
-            golioth_fw_update_report_state_sync(&_component_ctx,
-                                                GOLIOTH_OTA_STATE_UPDATING,
-                                                GOLIOTH_OTA_REASON_FIRMWARE_UPDATED_SUCCESSFULLY,
-                                                FW_REPORT_COMPONENT_NAME
-                                                    | FW_REPORT_CURRENT_VERSION);
-        }
-    }
+          golioth_fw_update_report_state_sync(&_component_ctx,
+                                              GOLIOTH_OTA_STATE_UPDATING,
+                                              GOLIOTH_OTA_REASON_FIRMWARE_UPDATED_SUCCESSFULLY,
+                                              FW_REPORT_COMPONENT_NAME
+                                                  | FW_REPORT_CURRENT_VERSION);
+      }
+  }
 
     fw_observe_manifest();
 
     struct download_progress_context download_ctx;
     uint8_t calc_sha256[GOLIOTH_OTA_COMPONENT_BIN_HASH_LEN];
 
+    bool force_to_be_same = false; 
+
+  while (1)
+  {
+    GLTH_LOGI(TAG, "State = Idle");
+    GLTH_LOGI(TAG, "\t\t\t-1");
+    golioth_fw_update_report_state_sync(&_component_ctx,
+                                        GOLIOTH_OTA_STATE_IDLE,
+                                        GOLIOTH_OTA_REASON_READY,
+                                        FW_REPORT_COMPONENT_NAME | FW_REPORT_CURRENT_VERSION
+                                            | FW_REPORT_TARGET_VERSION);
+
+    GLTH_LOGI(TAG, "Waiting to receive OTA manifest");
+
     while (1)
     {
+        int32_t manifest_timeout = (_component_ctx.backoff_duration_ms == 0)
+            ? GOLIOTH_SYS_WAIT_FOREVER
+            : backoff_ms_before_expiration(&_component_ctx);
+
         GLTH_LOGI(TAG, "State = Idle");
-        golioth_fw_update_report_state_sync(&_component_ctx,
-                                            GOLIOTH_OTA_STATE_IDLE,
-                                            GOLIOTH_OTA_REASON_READY,
-                                            FW_REPORT_COMPONENT_NAME | FW_REPORT_CURRENT_VERSION
-                                                | FW_REPORT_TARGET_VERSION);
+        GLTH_LOGI(TAG, "\t\t\t-2");
 
-        GLTH_LOGI(TAG, "Waiting to receive OTA manifest");
+        if (manifest_timeout == GOLIOTH_SYS_WAIT_FOREVER || force_to_be_same)
+        { 
+            
+            GLTH_LOGI(TAG, "\t\t\t-3");
+            golioth_fw_update_report_state_sync(&_component_ctx,
+                                                GOLIOTH_OTA_STATE_IDLE,
+                                                GOLIOTH_OTA_REASON_READY,
+                                                FW_REPORT_COMPONENT_NAME
+                                                    | FW_REPORT_CURRENT_VERSION);
 
-        while (1)
-        {
-            int32_t manifest_timeout = (_component_ctx.backoff_duration_ms == 0)
-                ? GOLIOTH_SYS_WAIT_FOREVER
-                : backoff_ms_before_expiration(&_component_ctx);
-
-            GLTH_LOGI(TAG, "State = Idle");
-
-            if (manifest_timeout == GOLIOTH_SYS_WAIT_FOREVER)
-            {
-                golioth_fw_update_report_state_sync(&_component_ctx,
-                                                    GOLIOTH_OTA_STATE_IDLE,
-                                                    GOLIOTH_OTA_REASON_READY,
-                                                    FW_REPORT_COMPONENT_NAME
-                                                        | FW_REPORT_CURRENT_VERSION);
-            }
-            else
-            {
-                golioth_fw_update_report_state_sync(&_component_ctx,
-                                                    GOLIOTH_OTA_STATE_IDLE,
-                                                    GOLIOTH_OTA_REASON_AWAIT_RETRY,
-                                                    FW_REPORT_COMPONENT_NAME
-                                                        | FW_REPORT_CURRENT_VERSION
-                                                        | FW_REPORT_TARGET_VERSION);
-            }
-
-            if (!golioth_sys_sem_take(_manifest_rcvd, manifest_timeout))
-            {
-                GLTH_LOGI(TAG,
-                          "Retry component download: %s",
-                          _component_ctx.config.fw_package_name);
-                break;
-            }
-
-            GLTH_LOGI(TAG, "Received OTA manifest");
-
-            bool new_component_received =
-                received_new_target_component(&_ota_manifest, &_component_ctx);
-
-            if (!new_component_received)
-            {
-                GLTH_LOGI(TAG,
-                          "Manifest does not contain different firmware version. Nothing to do.");
-                continue;
-            }
-
-            // clang-format off
-            if (fw_update_check_candidate(_component_ctx.target_component.hash,
-                                          _component_ctx.target_component.size) == GOLIOTH_OK)
-            // clang-format on
-            {
-                GLTH_LOGI(TAG, "Target component already downloaded. Attempting to update.");
-                if (fw_change_image_and_reboot() != GOLIOTH_OK)
-                {
-                    GLTH_LOGE(TAG,
-                              "Failed to reboot into new image. Attempting to download again.");
-                }
-            }
-
-            break;
-        }
-
-        GLTH_LOGI(TAG, "State = Downloading");
-        golioth_fw_update_report_state_sync(&_component_ctx,
-                                            GOLIOTH_OTA_STATE_DOWNLOADING,
-                                            GOLIOTH_OTA_REASON_READY,
-                                            FW_REPORT_COMPONENT_NAME | FW_REPORT_CURRENT_VERSION
-                                                | FW_REPORT_TARGET_VERSION);
-
-        uint64_t start_time_ms = golioth_sys_now_ms();
-        download_ctx.bytes_downloaded = 0;
-        download_ctx.retries = 0;
-        download_ctx.sha = golioth_sys_sha256_create();
-
-        int err;
-
-        struct block_retry_context retry_context = {
-            .download_ctx = &download_ctx,
-            .component_ctx = &_component_ctx,
-        };
-
-        struct golioth_timer_config retry_timer_config = {
-            .name = "",
-            .expiration_ms = FW_UPDATE_RESUME_DELAY_S * 1000,
-            .fn = block_retry_timer_expiry,
-            .user_arg = &retry_context,
-        };
-        download_ctx.block_retry_timer = golioth_sys_timer_create(&retry_timer_config);
-
-        err = golioth_ota_download_component(_client,
-                                             &_component_ctx.target_component,
-                                             0,
-                                             fw_write_block_cb,
-                                             fw_download_end_cb,
-                                             &download_ctx);
-
-        if (GOLIOTH_OK == err)
-        {
-            golioth_sys_sem_take(_download_complete, GOLIOTH_SYS_WAIT_FOREVER);
-            err = download_ctx.result;
+            GLTH_LOGI(TAG, "\t\t\t Update_thread DONE 2");
         }
         else
         {
-            GLTH_LOGE(TAG, "Failed to start OTA componnent download");
+            
+            GLTH_LOGI(TAG, "\t\t\t-4");
+            golioth_fw_update_report_state_sync(&_component_ctx,
+                                                GOLIOTH_OTA_STATE_IDLE,
+                                                GOLIOTH_OTA_REASON_AWAIT_RETRY,
+                                                FW_REPORT_COMPONENT_NAME
+                                                    | FW_REPORT_CURRENT_VERSION
+                                                    | FW_REPORT_TARGET_VERSION);
         }
 
-        golioth_sys_timer_destroy(download_ctx.block_retry_timer);
-
-        /* Download finished, prepare backoff in case needed */
-        backoff_increment(&_component_ctx);
-
-        if (err != GOLIOTH_OK)
+        GLTH_LOGI(TAG, "\t\t\t Update_thread DONE 3");
+        if (!golioth_sys_sem_take(_manifest_rcvd, manifest_timeout))
         {
-            switch (err)
+            
+            GLTH_LOGI(TAG, "\t\t\t-5");
+            GLTH_LOGI(TAG,
+                      "Retry component download: %s",
+                      _component_ctx.config.fw_package_name);
+            //break;
+            force_to_be_same = true;
+            continue;
+        }
+
+        GLTH_LOGI(TAG, "Received OTA manifest");
+
+        bool new_component_received =
+            received_new_target_component(&_ota_manifest, &_component_ctx);
+
+        if (!new_component_received || force_to_be_same) 
+        {
+            GLTH_LOGI(TAG,
+                      "Manifest does not contain different firmware version. Nothing to do.");
+            continue;
+        }
+
+        GLTH_LOGI(TAG, "\t\t\t Update_thread DONE 4");
+        // clang-format off
+        if (fw_update_check_candidate(_component_ctx.target_component.hash,
+                                      _component_ctx.target_component.size) == GOLIOTH_OK)
+        // clang-format on
+        {
+            GLTH_LOGI(TAG, "Target component already downloaded. Attempting to update.");
+            if (fw_change_image_and_reboot() != GOLIOTH_OK)
             {
-                case GOLIOTH_ERR_IO:
-                    fw_download_failed(GOLIOTH_OTA_REASON_IO);
-                    break;
-                default:
-                    fw_download_failed(GOLIOTH_OTA_REASON_FIRMWARE_UPDATE_FAILED);
-                    break;
+                GLTH_LOGE(TAG,
+                          "Failed to reboot into new image. Attempting to download again.");
             }
-
-            golioth_sys_sha256_destroy(download_ctx.sha);
-            continue;
         }
 
-        golioth_sys_sha256_finish(download_ctx.sha, calc_sha256);
-        golioth_sys_sha256_destroy(download_ctx.sha);
-
-        if (GOLIOTH_OK != fw_update_post_download())
-        {
-            GLTH_LOGE(TAG, "Failed to perform post download operations");
-            fw_download_failed(GOLIOTH_OTA_REASON_FIRMWARE_UPDATE_FAILED);
-            continue;
-        };
-
-        if (GOLIOTH_OK
-            != fw_verify_component_hash(calc_sha256, _component_ctx.target_component.hash))
-        {
-            fw_download_failed(GOLIOTH_OTA_REASON_INTEGRITY_CHECK_FAILURE);
-            continue;
-        }
-        else
-        {
-            GLTH_LOGD(TAG, "SHA256 matches server");
-        }
-
-        GLTH_LOGI(TAG,
-                  "Successfully downloaded %zu bytes in %" PRIu64 " ms",
-                  download_ctx.bytes_downloaded,
-                  golioth_sys_now_ms() - start_time_ms);
-        (void) start_time_ms;
-
-        GLTH_LOGI(TAG, "State = Downloaded");
-        golioth_fw_update_report_state_sync(&_component_ctx,
-                                            GOLIOTH_OTA_STATE_DOWNLOADED,
-                                            GOLIOTH_OTA_REASON_READY,
-                                            FW_REPORT_COMPONENT_NAME | FW_REPORT_CURRENT_VERSION
-                                                | FW_REPORT_TARGET_VERSION);
-
-        /* Download successful. Reset backoff */
-        backoff_reset(&_component_ctx);
-
-        if (fw_change_image_and_reboot() != GOLIOTH_OK)
-        {
-            GLTH_LOGE(TAG, "Failed to reboot into new image.");
-            fw_update_end();
-        }
+        break;
     }
+
+    GLTH_LOGI(TAG, "State = Downloading");
+    golioth_fw_update_report_state_sync(&_component_ctx,
+                                        GOLIOTH_OTA_STATE_DOWNLOADING,
+                                        GOLIOTH_OTA_REASON_READY,
+                                        FW_REPORT_COMPONENT_NAME | FW_REPORT_CURRENT_VERSION
+                                            | FW_REPORT_TARGET_VERSION);
+
+    uint64_t start_time_ms = golioth_sys_now_ms();
+    download_ctx.bytes_downloaded = 0;
+    download_ctx.retries = 0;
+    download_ctx.sha = golioth_sys_sha256_create();
+
+    int err;
+
+    struct block_retry_context retry_context = {
+        .download_ctx = &download_ctx,
+        .component_ctx = &_component_ctx,
+    };
+
+    struct golioth_timer_config retry_timer_config = {
+        .name = "",
+        .expiration_ms = FW_UPDATE_RESUME_DELAY_S * 1000,
+        .fn = block_retry_timer_expiry,
+        .user_arg = &retry_context,
+    };
+    download_ctx.block_retry_timer = golioth_sys_timer_create(&retry_timer_config);
+
+    err = golioth_ota_download_component(_client,
+                                         &_component_ctx.target_component,
+                                         0,
+                                         fw_write_block_cb,
+                                         fw_download_end_cb,
+                                         &download_ctx);
+
+    if (GOLIOTH_OK == err)
+    {
+        golioth_sys_sem_take(_download_complete, GOLIOTH_SYS_WAIT_FOREVER);
+        err = download_ctx.result;
+    }
+    else
+    {
+        GLTH_LOGE(TAG, "Failed to start OTA componnent download");
+    }
+
+    golioth_sys_timer_destroy(download_ctx.block_retry_timer);
+
+    /* Download finished, prepare backoff in case needed */
+    backoff_increment(&_component_ctx);
+
+    if (err != GOLIOTH_OK)
+    {
+        switch (err)
+        {
+            case GOLIOTH_ERR_IO:
+                fw_download_failed(GOLIOTH_OTA_REASON_IO);
+                break;
+            default:
+                fw_download_failed(GOLIOTH_OTA_REASON_FIRMWARE_UPDATE_FAILED);
+                break;
+        }
+
+        golioth_sys_sha256_destroy(download_ctx.sha);
+        continue;
+    }
+
+    enum golioth_status osprey_sha256_result =  golioth_sys_sha256_finish(download_ctx.sha, calc_sha256);
+    if (osprey_sha256_result==GOLIOTH_ERR_FAIL)
+        GLTH_LOGE(TAG, "HASH FAILED");
+
+    golioth_sys_sha256_destroy(download_ctx.sha);
+
+    // Verification Step 1
+    /*    esp_err_t esp_ota_end(esp_ota_handle_thandle)
+              Finish OTA update and validate newly written app image.
+
+    Return
+      ESP_OK: Newly written OTA app image is valid.
+      ESP_ERR_NOT_FOUND: OTA handle was not found.
+      ESP_ERR_INVALID_ARG: Handle was never written to.
+      ESP_ERR_OTA_VALIDATE_FAILED: OTA image is invalid (either not a valid app image, or - if secure boot is enabled - signature failed to verify.)
+      ESP_ERR_INVALID_STATE: If flash encryption is enabled, this result indicates an internal error writing the final encrypted bytes to flash.
+    */
+    if (GOLIOTH_OK != fw_update_post_download())
+    {
+        GLTH_LOGE(TAG, "Failed to perform post download operations");
+        golioth_fw_update_report_state_sync(&_component_ctx,
+                                                GOLIOTH_OTA_STATE_IDLE,
+                                                GOLIOTH_OTA_REASON_FIRMWARE_UPDATE_FAILED,
+                                                FW_REPORT_COMPONENT_NAME
+                                                    | FW_REPORT_CURRENT_VERSION);
+        golioth_fw_update_report_state_sync(&_component_ctx,
+                                                GOLIOTH_OTA_STATE_IDLE,
+                                                GOLIOTH_OTA_REASON_FIRMWARE_UPDATE_FAILED,
+                                                FW_REPORT_COMPONENT_NAME
+                                                    | FW_REPORT_CURRENT_VERSION);
+        fw_download_failed(GOLIOTH_OTA_REASON_FIRMWARE_UPDATE_FAILED);
+        //fw_update_end();
+        //return;
+      ///*
+        fw_update_end();
+        GLTH_LOGW(TAG, "Failed to download");
+        GLTH_LOGW(TAG, "!!!");
+        GLTH_LOGW(TAG, "!!! rebooting now! OTA update will be ignored for now");
+        GLTH_LOGW(TAG, "!!!");
+
+        // If the validation fails it will skip once expecting that next time 
+        // the new firmware will be pass at validation steps checks
+        osprey_golioth_fw_update_nvs_set("skp_updt");
+        osprey_golioth_fw_update_nvs_rst("rst_updt");
+        //fw_update_rollback();
+        fw_update_reboot();
+      //*/
+        continue;
+    };
+    
+    // Verification Step 2
+    if (GOLIOTH_OK
+        != fw_verify_component_hash(calc_sha256, _component_ctx.target_component.hash))
+    {
+        fw_download_failed(GOLIOTH_OTA_REASON_INTEGRITY_CHECK_FAILURE);
+        GLTH_LOGE(TAG, "Failed to perform HASH INTEGRITY CHECK operations");
+        golioth_fw_update_report_state_sync(&_component_ctx,
+                                                GOLIOTH_OTA_STATE_IDLE,
+                                                GOLIOTH_OTA_REASON_INTEGRITY_CHECK_FAILURE,
+                                                FW_REPORT_COMPONENT_NAME
+                                                    | FW_REPORT_CURRENT_VERSION);
+        golioth_fw_update_report_state_sync(&_component_ctx,
+                                                GOLIOTH_OTA_STATE_IDLE,
+                                                GOLIOTH_OTA_REASON_INTEGRITY_CHECK_FAILURE,
+                                                FW_REPORT_COMPONENT_NAME
+                                                    | FW_REPORT_CURRENT_VERSION);
+      ///*
+        fw_update_end();
+        GLTH_LOGW(TAG, "Failed to download");
+        GLTH_LOGW(TAG, "!!!");
+        GLTH_LOGW(TAG, "!!! Rolling back and rebooting now!");
+        GLTH_LOGW(TAG, "!!!");
+        //fw_update_rollback();
+        osprey_golioth_fw_update_nvs_set("skp_updt");
+        osprey_golioth_fw_update_nvs_rst("rst_updt");
+        fw_update_reboot();
+      //*/
+        continue;
+    }
+    else
+    {
+        GLTH_LOGD(TAG, "SHA256 matches server");
+    }
+
+    GLTH_LOGI(TAG,
+              "Successfully downloaded %zu bytes in %" PRIu64 " ms",
+              download_ctx.bytes_downloaded,
+              golioth_sys_now_ms() - start_time_ms);
+
+    osprey_golioth_fw_update_nvs_set("rlbk_con");
+    GLTH_LOGI(TAG, "State = Downloaded");
+    golioth_fw_update_report_state_sync(&_component_ctx,
+                                        GOLIOTH_OTA_STATE_DOWNLOADED,
+                                        GOLIOTH_OTA_REASON_READY,
+                                        FW_REPORT_COMPONENT_NAME | FW_REPORT_CURRENT_VERSION
+                                            | FW_REPORT_TARGET_VERSION);
+
+    /* Download successful. Reset backoff */
+    backoff_reset(&_component_ctx);
+
+    if (fw_change_image_and_reboot() != GOLIOTH_OK)
+    {
+        GLTH_LOGE(TAG, "Failed to reboot into new image.");
+        fw_update_end();
+    }
+  }
+
+  GLTH_LOGI(TAG, "\t\t\t Update_thread DONE 1");
 }
 
 void golioth_fw_update_init(struct golioth_client *client, const char *current_version)

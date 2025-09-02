@@ -12,7 +12,6 @@ extern "C"
 #pragma once
 
 #include <golioth/config.h>
-#include <golioth/golioth_sys.h>
 #include <stdbool.h>
 #include <stdint.h>
 
