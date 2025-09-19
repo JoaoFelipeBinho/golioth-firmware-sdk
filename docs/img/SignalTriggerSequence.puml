@@ -1,0 +1,10 @@
+@startuml
+hide footbox
+
+GPIO -> "GPIO ISR":Falling Edge
+"GPIO ISR" -> EventGroup:Set Event
+EventGroup -> "Task/Feature":Wake Up
+@enduml
+
+
+
